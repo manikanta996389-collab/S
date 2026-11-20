@@ -1,0 +1,6 @@
+{
+  "name": "CCTV Secure Monitor",
+  "description": "Professional CCTV surveillance monitoring app with high cybersecurity firewall protection.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
