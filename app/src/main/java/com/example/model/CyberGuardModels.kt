@@ -165,3 +165,23 @@ data class PrivacyMask(
     val description: String = "Sensitive area protected from surveillance recording"
 )
 
+enum class ClipNamingPattern(
+    val displayName: String,
+    val patternHint: String
+) {
+    STANDARD("Standard", "<PREFIX>_<CAM>_YYYYMMDD_HHmmss.mp4"),
+    ISO_TIMESTAMP("ISO Date", "<PREFIX>_YYYY-MM-DD_HH-mm-ss_<CAM>.mp4"),
+    INCIDENT_LOG("Incident", "INC_<PREFIX>_<CAM>_YYYYMMDD_HHmmss.mp4")
+}
+
+data class SavedVideoClip(
+    val id: String,
+    val fileName: String,
+    val filePath: String,
+    val sizeBytes: Long,
+    val durationMs: Long,
+    val createdAtMillis: Long,
+    val sourceLabel: String
+)
+
+

@@ -7,10 +7,12 @@ import com.example.model.AgentProfile
 import com.example.model.AuditCamera
 import com.example.model.BlockCategory
 import com.example.model.CameraZone
+import com.example.model.ClipNamingPattern
 import com.example.model.EventSeverity
 import com.example.model.PrivacyMask
 import com.example.model.PrivacyMaskStyle
 import com.example.model.QuizQuestion
+import com.example.model.SavedVideoClip
 import com.example.model.SecurityEvent
 import com.example.model.TriageAlert
 import com.example.model.TriageDecision
@@ -52,6 +54,15 @@ data class CyberGuardUiState(
     val isClarityFilterActive: Boolean = false,
     val refocusPulseCount: Int = 0,
     val isBlurDiagnosticOpen: Boolean = false,
+    val isRecordingVideo: Boolean = false,
+    val recordingDurationMs: Long = 0L,
+    val activeRecordingFilePath: String? = null,
+    val clipNamingPrefix: String = "CCTV",
+    val clipNamingPattern: ClipNamingPattern = ClipNamingPattern.STANDARD,
+    val savedVideoClips: List<SavedVideoClip> = emptyList(),
+    val totalClipsStorageBytes: Long = 0L,
+    val selectedClipForPlayback: SavedVideoClip? = null,
+    val recordingStatusMessage: String? = null,
     val isPrivacyMaskingEnabled: Boolean = true,
     val privacyMaskStyle: PrivacyMaskStyle = PrivacyMaskStyle.BLACKOUT,
     val selectedPrivacyMaskForDetail: PrivacyMask? = null,
@@ -342,6 +353,107 @@ class CyberGuardViewModel : ViewModel() {
             val target = open ?: !current.isBlurDiagnosticOpen
             current.copy(isBlurDiagnosticOpen = target)
         }
+    }
+
+    // Local Video Clip Recording & Internal Storage Management
+    fun setClipNamingPrefix(prefix: String) {
+        _uiState.update { it.copy(clipNamingPrefix = prefix) }
+    }
+
+    fun setClipNamingPattern(pattern: ClipNamingPattern) {
+        _uiState.update { it.copy(clipNamingPattern = pattern) }
+    }
+
+    fun startVideoRecording(outputFilePath: String) {
+        _uiState.update { current ->
+            current.copy(
+                isDeviceCameraActive = true,
+                isRecordingVideo = true,
+                recordingDurationMs = 0L,
+                activeRecordingFilePath = outputFilePath,
+                recordingStatusMessage = "Recording active -> ${outputFilePath.substringAfterLast('/')}"
+            )
+        }
+    }
+
+    fun updateRecordingProgress(durationMs: Long) {
+        _uiState.update { current ->
+            if (current.isRecordingVideo) {
+                current.copy(recordingDurationMs = durationMs)
+            } else {
+                current
+            }
+        }
+    }
+
+    fun stopVideoRecording() {
+        _uiState.update { current ->
+            current.copy(
+                isRecordingVideo = false,
+                recordingStatusMessage = "Finalizing MP4 clip to internal storage..."
+            )
+        }
+    }
+
+    fun onVideoRecordingSaved(
+        savedFileName: String,
+        durationMs: Long,
+        updatedClips: List<SavedVideoClip>,
+        totalStorageBytes: Long
+    ) {
+        _uiState.update { current ->
+            val logEvent = if (!current.areAlertsMuted) {
+                SecurityEvent(
+                    id = "clip_${System.currentTimeMillis()}",
+                    timestamp = "Just Now",
+                    cameraName = if (current.cameraFacingFront) "Device Cam (Front)" else "Device Cam (Rear)",
+                    eventType = "INFO: Video Clip Saved Locally",
+                    severity = EventSeverity.INFO,
+                    description = "Recorded surveillance clip '$savedFileName' saved securely to internal app storage (/cctv_clips).",
+                    isAuthorized = true,
+                    errorCode = "CLIP_SAVED_200",
+                    remediationAction = "Open Local Video Clip Vault to review or manage footage."
+                )
+            } else null
+
+            current.copy(
+                isRecordingVideo = false,
+                recordingDurationMs = 0L,
+                activeRecordingFilePath = null,
+                savedVideoClips = updatedClips,
+                totalClipsStorageBytes = totalStorageBytes,
+                recordingStatusMessage = "Saved: $savedFileName (${durationMs / 1000L}s)",
+                events = if (logEvent != null) listOf(logEvent) + current.events.take(15) else current.events
+            )
+        }
+    }
+
+    fun onVideoRecordingError(errorMessage: String) {
+        _uiState.update { current ->
+            current.copy(
+                isRecordingVideo = false,
+                recordingDurationMs = 0L,
+                activeRecordingFilePath = null,
+                recordingStatusMessage = "Error: $errorMessage"
+            )
+        }
+    }
+
+    fun refreshSavedVideoClips(clips: List<SavedVideoClip>, totalStorageBytes: Long) {
+        _uiState.update { current ->
+            val selected = current.selectedClipForPlayback?.let { currentSel ->
+                clips.firstOrNull { it.filePath == currentSel.filePath }
+            }
+            current.copy(
+                savedVideoClips = clips,
+                totalClipsStorageBytes = totalStorageBytes,
+                selectedClipForPlayback = selected
+            )
+        }
+    }
+
+    fun selectClipForPlayback(clip: SavedVideoClip?) {
+        _uiState.update { it.copy(selectedClipForPlayback = clip) }
     }
 
     // Privacy Masking Controls

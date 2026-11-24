@@ -62,6 +62,8 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -72,8 +74,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import com.example.data.LocationService
+import com.example.data.VideoClipStorageManager
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -87,13 +94,17 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.example.model.ClipNamingPattern
 import com.example.model.EventSeverity
 import com.example.model.PrivacyMask
 import com.example.model.PrivacyMaskStyle
+import com.example.model.SavedVideoClip
 import com.example.model.SecurityEvent
 import com.example.ui.components.CameraMonitorView
 import com.example.ui.components.CircularScoreGauge
 import com.example.ui.components.GeoCameraRadarView
+import com.example.ui.components.LocalVideoVaultCard
+import com.example.ui.components.VideoClipPlayerDialog
 import com.example.ui.theme.CyberAmber
 import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.CyberGreen
@@ -110,6 +121,10 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.viewmodel.CyberGuardUiState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 @Composable
 fun CommandScreen(
@@ -149,10 +164,35 @@ fun CommandScreen(
     onToggleClarityFilter: () -> Unit = {},
     onTriggerRefocusPulse: () -> Unit = {},
     onToggleBlurDiagnostic: (Boolean?) -> Unit = {},
+    onSetClipNamingPrefix: (String) -> Unit = {},
+    onSetClipNamingPattern: (ClipNamingPattern) -> Unit = {},
+    onStartVideoRecording: (String) -> Unit = {},
+    onUpdateRecordingProgress: (Long) -> Unit = {},
+    onStopVideoRecording: () -> Unit = {},
+    onVideoRecordingSaved: (String, Long, List<SavedVideoClip>, Long) -> Unit = { _, _, _, _ -> },
+    onVideoRecordingError: (String) -> Unit = {},
+    onRefreshSavedVideoClips: (List<SavedVideoClip>, Long) -> Unit = { _, _ -> },
+    onSelectClipForPlayback: (SavedVideoClip?) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val locationService = remember(context) { LocationService(context) }
+    val videoClipStorage = remember(context) { VideoClipStorageManager(context) }
+    val clipPrefs = remember(context) {
+        context.getSharedPreferences("cctv_clip_prefs", Context.MODE_PRIVATE)
+    }
+    var pendingRecordAfterPermission by remember { mutableStateOf(false) }
+
+    val startRecordingNow: () -> Unit = {
+        val sourceTag = if (uiState.cameraFacingFront) "FRONT" else "REAR"
+        val outputFile = videoClipStorage.createClipOutputFile(
+            customPrefix = uiState.clipNamingPrefix,
+            cameraSourceTag = sourceTag,
+            pattern = uiState.clipNamingPattern
+        )
+        onStartVideoRecording(outputFile.absolutePath)
+    }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -160,6 +200,33 @@ fun CommandScreen(
         onSetCameraPermission(isGranted)
         if (isGranted) {
             onToggleDeviceCamera(true)
+            if (pendingRecordAfterPermission) {
+                pendingRecordAfterPermission = false
+                startRecordingNow()
+            }
+        } else {
+            pendingRecordAfterPermission = false
+            onVideoRecordingError("Camera permission required to record video clips.")
+        }
+    }
+
+    val handleToggleRecordClip: () -> Unit = {
+        if (uiState.isRecordingVideo) {
+            onStopVideoRecording()
+        } else {
+            val hasCamPermission = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+            if (hasCamPermission) {
+                onSetCameraPermission(true)
+                onToggleDeviceCamera(true)
+                startRecordingNow()
+            } else {
+                pendingRecordAfterPermission = true
+                onToggleDeviceCamera(true)
+                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+            }
         }
     }
 
@@ -169,6 +236,21 @@ fun CommandScreen(
             Manifest.permission.CAMERA
         ) == PackageManager.PERMISSION_GRANTED
         onSetCameraPermission(hasCamPermission)
+
+        val savedPrefix = clipPrefs.getString("clip_prefix", null)
+        if (!savedPrefix.isNullOrBlank()) {
+            onSetClipNamingPrefix(savedPrefix)
+        }
+        val savedPatternName = clipPrefs.getString("clip_pattern", null)
+        val savedPattern = ClipNamingPattern.entries.firstOrNull { it.name == savedPatternName }
+        if (savedPattern != null) {
+            onSetClipNamingPattern(savedPattern)
+        }
+
+        val (clips, totalBytes) = withContext(Dispatchers.IO) {
+            videoClipStorage.listSavedClips() to videoClipStorage.getTotalStorageBytes()
+        }
+        onRefreshSavedVideoClips(clips, totalBytes)
     }
 
     val locationPermissionLauncher = rememberLauncherForActivityResult(
@@ -1084,22 +1166,69 @@ fun CommandScreen(
                         privacyMaskStyle = uiState.privacyMaskStyle,
                         isClarityFilterActive = uiState.isClarityFilterActive,
                         refocusPulseCount = uiState.refocusPulseCount,
+                        isRecording = uiState.isRecordingVideo,
+                        recordingDurationMs = uiState.recordingDurationMs,
+                        recordingOutputFile = uiState.activeRecordingFilePath?.let { File(it) },
                         onMaskClicked = { mask -> onSelectPrivacyMaskForDetail(mask) },
                         onRequestCameraPermission = {
                             cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
                         },
                         onToggleCameraFacing = onToggleCameraFacing,
                         onTriggerRefocus = onTriggerRefocusPulse,
-                        onOpenBlurDiagnostic = { onToggleBlurDiagnostic(true) }
+                        onOpenBlurDiagnostic = { onToggleBlurDiagnostic(true) },
+                        onRecordingProgress = onUpdateRecordingProgress,
+                        onRecordingFinalized = { savedFile, durationMs ->
+                            coroutineScope.launch {
+                                val (clips, totalBytes) = withContext(Dispatchers.IO) {
+                                    videoClipStorage.listSavedClips() to videoClipStorage.getTotalStorageBytes()
+                                }
+                                onVideoRecordingSaved(savedFile.name, durationMs, clips, totalBytes)
+                            }
+                        },
+                        onRecordingError = { errMsg ->
+                            onVideoRecordingError(errMsg)
+                        }
                     )
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    // Primary Stream Mode Row: IR Night, Lens Switch, Intruder Simulation
+                    // Primary Stream Mode Row: Record Clip, IR Night, Lens Switch, Intruder Simulation
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        Button(
+                            onClick = handleToggleRecordClip,
+                            modifier = Modifier
+                                .weight(1.1f)
+                                .testTag("quick_record_clip_btn"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (uiState.isRecordingVideo) CyberRed else Color(0x28FF3D71),
+                                contentColor = if (uiState.isRecordingVideo) Color.White else CyberRed
+                            ),
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                CyberRed
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (uiState.isRecordingVideo) Icons.Default.Stop else Icons.Default.FiberManualRecord,
+                                contentDescription = if (uiState.isRecordingVideo) "Stop Recording" else "Record Clip",
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = if (uiState.isRecordingVideo) {
+                                    "Stop ${VideoClipStorageManager.formatDuration(uiState.recordingDurationMs)}"
+                                } else {
+                                    "Rec Clip"
+                                },
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
                         Button(
                             onClick = onToggleNightVision,
                             colors = ButtonDefaults.buttonColors(
@@ -1111,12 +1240,12 @@ fun CommandScreen(
                                 if (uiState.isNightVision) CyberGreen else DarkBorderSubtle
                             ),
                             shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(0.95f)
                         ) {
-                            Text(text = if (uiState.isNightVision) "IR Night: ON" else "IR Night: OFF", fontSize = 11.sp)
+                            Text(text = if (uiState.isNightVision) "IR: ON" else "IR: OFF", fontSize = 11.sp)
                         }
 
-                        if (uiState.isDeviceCameraActive && uiState.isCameraPermissionGranted) {
+                        if (uiState.isDeviceCameraActive && uiState.isCameraPermissionGranted && !uiState.isRecordingVideo) {
                             Button(
                                 onClick = onToggleCameraFacing,
                                 colors = ButtonDefaults.buttonColors(
@@ -1125,7 +1254,7 @@ fun CommandScreen(
                                 ),
                                 border = androidx.compose.foundation.BorderStroke(1.dp, CyberCyan.copy(alpha = 0.5f)),
                                 shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier.weight(1f)
+                                modifier = Modifier.weight(0.95f)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Cameraswitch,
@@ -1134,7 +1263,7 @@ fun CommandScreen(
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = if (uiState.cameraFacingFront) "Lens: Front" else "Lens: Rear",
+                                    text = if (uiState.cameraFacingFront) "Front" else "Rear",
                                     fontSize = 11.sp
                                 )
                             }
@@ -1153,16 +1282,16 @@ fun CommandScreen(
                                 if (uiState.isBreachSimulated) CyberRed else CyberRed.copy(alpha = 0.5f)
                             ),
                             shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.weight(1.3f)
+                            modifier = Modifier.weight(1.1f)
                         ) {
                             Icon(
                                 imageVector = if (uiState.isBreachSimulated) Icons.Default.Close else Icons.Default.Warning,
                                 contentDescription = null,
                                 modifier = Modifier.size(14.dp)
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = if (uiState.isBreachSimulated) "Dismiss Intruder" else "Simulate Intruder",
+                                text = if (uiState.isBreachSimulated) "Dismiss" else "Intruder",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -1245,12 +1374,55 @@ fun CommandScreen(
 
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = if (uiState.isBreachSimulated) "Perimeter breach simulation active! Tap 'Dismiss Intruder' to clear." else "Tap feed or 'Refocus Lens' to autofocus. Toggle 'Clarity' for anti-blur sharpening.",
+                        text = if (uiState.isBreachSimulated) "Perimeter breach simulation active! Tap 'Dismiss' to clear." else "Tap 'Rec Clip' to save MP4 video locally. Tap feed or 'Refocus Lens' to autofocus.",
                         fontSize = 10.sp,
                         color = if (uiState.isBreachSimulated) CyberRed else TextMuted
                     )
                     Spacer(modifier = Modifier.height(18.dp))
                 }
+            }
+
+            // 8. LOCAL INTERNAL STORAGE VIDEO CLIP VAULT & NAMING CONVENTION CARD
+            item {
+                LocalVideoVaultCard(
+                    isRecording = uiState.isRecordingVideo,
+                    recordingDurationMs = uiState.recordingDurationMs,
+                    clipNamingPrefix = uiState.clipNamingPrefix,
+                    clipNamingPattern = uiState.clipNamingPattern,
+                    cameraSourceTag = if (uiState.cameraFacingFront) "FRONT" else "REAR",
+                    savedClips = uiState.savedVideoClips,
+                    totalStorageBytes = uiState.totalClipsStorageBytes,
+                    recordingStatusMessage = uiState.recordingStatusMessage,
+                    onPrefixChange = { newPrefix ->
+                        onSetClipNamingPrefix(newPrefix)
+                        clipPrefs.edit().putString("clip_prefix", newPrefix).apply()
+                    },
+                    onPatternSelect = { newPattern ->
+                        onSetClipNamingPattern(newPattern)
+                        clipPrefs.edit().putString("clip_pattern", newPattern.name).apply()
+                    },
+                    onToggleRecord = handleToggleRecordClip,
+                    onPlayClip = { clip -> onSelectClipForPlayback(clip) },
+                    onDeleteClip = { clip ->
+                        coroutineScope.launch {
+                            val (clips, totalBytes) = withContext(Dispatchers.IO) {
+                                videoClipStorage.deleteClip(clip.filePath)
+                                videoClipStorage.listSavedClips() to videoClipStorage.getTotalStorageBytes()
+                            }
+                            onRefreshSavedVideoClips(clips, totalBytes)
+                        }
+                    },
+                    onClearAllClips = {
+                        coroutineScope.launch {
+                            val (clips, totalBytes) = withContext(Dispatchers.IO) {
+                                videoClipStorage.clearAllClips()
+                                videoClipStorage.listSavedClips() to videoClipStorage.getTotalStorageBytes()
+                            }
+                            onRefreshSavedVideoClips(clips, totalBytes)
+                        }
+                    }
+                )
+                Spacer(modifier = Modifier.height(18.dp))
             }
 
             // 8A. CCTV PRIVACY ZONE MASKING CARD
@@ -2307,6 +2479,25 @@ fun CommandScreen(
                 dismissButton = {
                     TextButton(onClick = { onToggleBlurDiagnostic(false) }) {
                         Text("Close", color = TextSecondary)
+                    }
+                }
+            )
+        }
+
+        // Local Saved Video Clip Playback Dialog
+        val playbackClip = uiState.selectedClipForPlayback
+        if (playbackClip != null) {
+            VideoClipPlayerDialog(
+                clip = playbackClip,
+                onDismiss = { onSelectClipForPlayback(null) },
+                onDelete = { clipToDelete ->
+                    onSelectClipForPlayback(null)
+                    coroutineScope.launch {
+                        val (clips, totalBytes) = withContext(Dispatchers.IO) {
+                            videoClipStorage.deleteClip(clipToDelete.filePath)
+                            videoClipStorage.listSavedClips() to videoClipStorage.getTotalStorageBytes()
+                        }
+                        onRefreshSavedVideoClips(clips, totalBytes)
                     }
                 }
             )

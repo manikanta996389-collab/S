@@ -5,6 +5,14 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.FileOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -17,6 +25,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,23 +39,37 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.ui.theme.TextMuted
+import java.io.File
 
 /**
- * CameraX Preview View embedded into Jetpack Compose for live device CCTV monitoring.
- * Binds to Android lifecycle safely, handles camera lens selection, and supports
- * tap-to-focus and manual autofocus sweep metering to resolve blurry feeds.
+ * CameraX Preview & VideoCapture View embedded into Jetpack Compose for live device CCTV monitoring.
+ * Binds to Android lifecycle safely, handles front/rear lens switching, tap-to-focus metering,
+ * and MP4 video recording saved directly to internal storage via [FileOutputOptions].
  */
 @Composable
 fun DeviceCameraPreviewView(
     isFrontCamera: Boolean,
     refocusTrigger: Int = 0,
+    isRecordingRequested: Boolean = false,
+    recordingOutputFile: File? = null,
     onFocusTriggered: ((Offset) -> Unit)? = null,
+    onRecordingStarted: () -> Unit = {},
+    onRecordingProgress: (Long) -> Unit = {},
+    onRecordingFinalized: (File, Long) -> Unit = { _, _ -> },
+    onRecordingError: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var initializationError by remember { mutableStateOf<String?>(null) }
     var activeCamera by remember { mutableStateOf<Camera?>(null) }
+    var videoCaptureUseCase by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
+    var activeRecording by remember { mutableStateOf<Recording?>(null) }
+
+    val latestOnRecordingStarted by rememberUpdatedState(onRecordingStarted)
+    val latestOnRecordingProgress by rememberUpdatedState(onRecordingProgress)
+    val latestOnRecordingFinalized by rememberUpdatedState(onRecordingFinalized)
+    val latestOnRecordingError by rememberUpdatedState(onRecordingError)
 
     val previewView = remember(context) {
         PreviewView(context).apply {
@@ -72,6 +95,59 @@ fun DeviceCameraPreviewView(
         }
     }
 
+    // Start or stop CameraX VideoCapture recording based on state
+    LaunchedEffect(isRecordingRequested, recordingOutputFile, videoCaptureUseCase) {
+        val videoCapture = videoCaptureUseCase
+        if (isRecordingRequested && recordingOutputFile != null) {
+            if (activeRecording != null) return@LaunchedEffect
+            if (videoCapture == null) {
+                return@LaunchedEffect
+            }
+            try {
+                recordingOutputFile.parentFile?.mkdirs()
+                val fileOutputOptions = FileOutputOptions.Builder(recordingOutputFile).build()
+                val executor = ContextCompat.getMainExecutor(context)
+
+                val recording = videoCapture.output
+                    .prepareRecording(context, fileOutputOptions)
+                    .start(executor) { event ->
+                        when (event) {
+                            is VideoRecordEvent.Start -> {
+                                latestOnRecordingStarted()
+                            }
+                            is VideoRecordEvent.Status -> {
+                                val durationMs = event.recordingStats.recordedDurationNanos / 1_000_000L
+                                latestOnRecordingProgress(durationMs)
+                            }
+                            is VideoRecordEvent.Finalize -> {
+                                activeRecording = null
+                                val durationMs = event.recordingStats.recordedDurationNanos / 1_000_000L
+                                if (!event.hasError()) {
+                                    latestOnRecordingFinalized(recordingOutputFile, durationMs)
+                                } else {
+                                    // Remove empty/corrupted partial file if recording failed
+                                    if (recordingOutputFile.exists() && recordingOutputFile.length() == 0L) {
+                                        recordingOutputFile.delete()
+                                    }
+                                    latestOnRecordingError("Video capture error (code ${event.error})")
+                                }
+                            }
+                        }
+                    }
+                activeRecording = recording
+            } catch (e: Exception) {
+                activeRecording = null
+                latestOnRecordingError(e.localizedMessage ?: "Failed to start video recording")
+            }
+        } else if (!isRecordingRequested && activeRecording != null) {
+            try {
+                activeRecording?.stop()
+            } catch (_: Exception) {
+                activeRecording = null
+            }
+        }
+    }
+
     DisposableEffect(isFrontCamera, lifecycleOwner) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         val executor = ContextCompat.getMainExecutor(context)
@@ -83,6 +159,15 @@ fun DeviceCameraPreviewView(
                     it.surfaceProvider = previewView.surfaceProvider
                 }
 
+                val qualitySelector = QualitySelector.fromOrderedList(
+                    listOf(Quality.HD, Quality.SD, Quality.FHD),
+                    FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
+                )
+                val recorder = Recorder.Builder()
+                    .setQualitySelector(qualitySelector)
+                    .build()
+                val videoCapture = VideoCapture.withOutput(recorder)
+
                 val cameraSelector = if (isFrontCamera) {
                     CameraSelector.DEFAULT_FRONT_CAMERA
                 } else {
@@ -90,11 +175,25 @@ fun DeviceCameraPreviewView(
                 }
 
                 cameraProvider.unbindAll()
-                val boundCamera = cameraProvider.bindToLifecycle(
-                    lifecycleOwner,
-                    cameraSelector,
-                    preview
-                )
+                val boundCamera = try {
+                    val cam = cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        preview,
+                        videoCapture
+                    )
+                    videoCaptureUseCase = videoCapture
+                    cam
+                } catch (_: Exception) {
+                    // Fallback to preview-only if hardware/emulator rejects dual use-cases
+                    videoCaptureUseCase = null
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        preview
+                    )
+                }
+
                 activeCamera = boundCamera
                 initializationError = null
             } catch (e: Exception) {
@@ -106,6 +205,9 @@ fun DeviceCameraPreviewView(
 
         onDispose {
             try {
+                activeRecording?.stop()
+                activeRecording = null
+                videoCaptureUseCase = null
                 activeCamera = null
                 if (cameraProviderFuture.isDone) {
                     cameraProviderFuture.get().unbindAll()
@@ -144,7 +246,7 @@ fun DeviceCameraPreviewView(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "Terminal Sensor Feed: ${initializationError}",
+                    text = "Terminal Sensor Feed: $initializationError",
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     color = TextMuted

@@ -64,6 +64,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.VideoClipStorageManager
 import com.example.model.CameraZone
 import com.example.model.PrivacyMask
 import com.example.model.PrivacyMaskStyle
@@ -74,6 +75,7 @@ import com.example.ui.theme.CyberNavyBorder
 import com.example.ui.theme.CyberRed
 import com.example.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
+import java.io.File
 import kotlin.math.roundToInt
 
 @Composable
@@ -90,11 +92,18 @@ fun CameraMonitorView(
     privacyMaskStyle: PrivacyMaskStyle = PrivacyMaskStyle.BLACKOUT,
     isClarityFilterActive: Boolean = false,
     refocusPulseCount: Int = 0,
+    isRecording: Boolean = false,
+    recordingDurationMs: Long = 0L,
+    recordingOutputFile: File? = null,
     onMaskClicked: (PrivacyMask) -> Unit = {},
     onRequestCameraPermission: () -> Unit = {},
     onToggleCameraFacing: () -> Unit = {},
     onTriggerRefocus: () -> Unit = {},
     onOpenBlurDiagnostic: () -> Unit = {},
+    onRecordingStarted: () -> Unit = {},
+    onRecordingProgress: (Long) -> Unit = {},
+    onRecordingFinalized: (File, Long) -> Unit = { _, _ -> },
+    onRecordingError: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "RadarSweep")
@@ -154,8 +163,13 @@ fun CameraMonitorView(
             .clip(RoundedCornerShape(16.dp))
             .background(frameBg)
             .border(
-                width = if (simulatedBreach) 2.dp else 1.dp,
-                color = if (simulatedBreach) CyberRed else if (isGuardingActive) CyberCyan else CyberNavyBorder,
+                width = if (simulatedBreach || isRecording) 2.dp else 1.dp,
+                color = when {
+                    isRecording -> CyberRed
+                    simulatedBreach -> CyberRed
+                    isGuardingActive -> CyberCyan
+                    else -> CyberNavyBorder
+                },
                 shape = RoundedCornerShape(16.dp)
             )
             .testTag("cctv_camera_monitor_frame")
@@ -164,10 +178,16 @@ fun CameraMonitorView(
             DeviceCameraPreviewView(
                 isFrontCamera = isFrontCamera,
                 refocusTrigger = refocusPulseCount,
+                isRecordingRequested = isRecording,
+                recordingOutputFile = recordingOutputFile,
                 onFocusTriggered = { offset ->
                     focusRingOffset = offset
                     focusRingTrigger++
                 },
+                onRecordingStarted = onRecordingStarted,
+                onRecordingProgress = onRecordingProgress,
+                onRecordingFinalized = onRecordingFinalized,
+                onRecordingError = onRecordingError,
                 modifier = Modifier.fillMaxSize()
             )
 
@@ -334,15 +354,30 @@ fun CameraMonitorView(
                     modifier = Modifier
                         .size(8.dp)
                         .clip(CircleShape)
-                        .background(if (isGuardingActive) CyberGreen.copy(alpha = blinkAlpha) else Color.Gray)
+                        .background(
+                            when {
+                                isRecording -> CyberRed.copy(alpha = blinkAlpha)
+                                isGuardingActive -> CyberGreen.copy(alpha = blinkAlpha)
+                                else -> Color.Gray
+                            }
+                        )
                 )
                 Spacer(modifier = Modifier.width(5.dp))
                 Text(
-                    text = if (isGuardingActive) "LIVE" else "STANDBY",
+                    text = when {
+                        isRecording -> "REC ${VideoClipStorageManager.formatDuration(recordingDurationMs)}"
+                        isGuardingActive -> "LIVE"
+                        else -> "STANDBY"
+                    },
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace,
-                    color = if (isGuardingActive) CyberGreen else Color.LightGray
+                    color = when {
+                        isRecording -> CyberRed
+                        isGuardingActive -> CyberGreen
+                        else -> Color.LightGray
+                    },
+                    modifier = Modifier.testTag("hud_live_rec_indicator")
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(

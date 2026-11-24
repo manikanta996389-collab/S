@@ -220,6 +220,19 @@ fun MainApp(
                         onToggleClarityFilter = { viewModel.toggleClarityFilter() },
                         onTriggerRefocusPulse = { viewModel.triggerRefocusPulse() },
                         onToggleBlurDiagnostic = { open -> viewModel.toggleBlurDiagnostic(open) },
+                        onSetClipNamingPrefix = { prefix -> viewModel.setClipNamingPrefix(prefix) },
+                        onSetClipNamingPattern = { pattern -> viewModel.setClipNamingPattern(pattern) },
+                        onStartVideoRecording = { path -> viewModel.startVideoRecording(path) },
+                        onUpdateRecordingProgress = { ms -> viewModel.updateRecordingProgress(ms) },
+                        onStopVideoRecording = { viewModel.stopVideoRecording() },
+                        onVideoRecordingSaved = { name, dur, clips, bytes ->
+                            viewModel.onVideoRecordingSaved(name, dur, clips, bytes)
+                        },
+                        onVideoRecordingError = { msg -> viewModel.onVideoRecordingError(msg) },
+                        onRefreshSavedVideoClips = { clips, bytes ->
+                            viewModel.refreshSavedVideoClips(clips, bytes)
+                        },
+                        onSelectClipForPlayback = { clip -> viewModel.selectClipForPlayback(clip) },
                         modifier = Modifier.padding(innerPadding)
                     )
 

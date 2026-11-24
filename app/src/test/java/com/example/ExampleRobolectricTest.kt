@@ -245,4 +245,100 @@ class ExampleRobolectricTest {
     assertNotNull(blurEvent.remediationAction)
     assertTrue(blurEvent.remediationAction!!.contains("auto-refocus") || blurEvent.remediationAction!!.contains("Clarity"))
   }
+
+  @Test
+  fun `video clip naming convention sanitizes prefix and embeds formatted timestamp`() {
+    val fixedMillis = 1763631045000L // Deterministic timestamp
+
+    val standardName = com.example.data.VideoClipStorageManager.buildClipFileName(
+      customPrefix = "gate / north!!",
+      cameraSourceTag = "rear",
+      pattern = com.example.model.ClipNamingPattern.STANDARD,
+      timestampMillis = fixedMillis
+    )
+    assertTrue(standardName.startsWith("GATE_NORTH_REAR_"))
+    assertTrue(standardName.endsWith(".mp4"))
+    assertFalse(standardName.contains("/"))
+
+    val isoName = com.example.data.VideoClipStorageManager.buildClipFileName(
+      customPrefix = "vault",
+      cameraSourceTag = "front",
+      pattern = com.example.model.ClipNamingPattern.ISO_TIMESTAMP,
+      timestampMillis = fixedMillis
+    )
+    assertTrue(isoName.startsWith("VAULT_"))
+    assertTrue(isoName.endsWith("_FRONT.mp4"))
+
+    val incidentName = com.example.data.VideoClipStorageManager.buildClipFileName(
+      customPrefix = "   ",
+      cameraSourceTag = "rear",
+      pattern = com.example.model.ClipNamingPattern.INCIDENT_LOG,
+      timestampMillis = fixedMillis
+    )
+    assertTrue(incidentName.startsWith("INC_CCTV_REAR_"))
+    assertTrue(incidentName.endsWith(".mp4"))
+  }
+
+  @Test
+  fun `video clip storage manager saves, deduplicates, lists, and deletes clips in internal directory`() {
+    val tempDir = java.nio.file.Files.createTempDirectory("cctv_clips_test").toFile()
+    try {
+      val manager = com.example.data.VideoClipStorageManager(tempDir)
+      val ts = 1763631045000L
+
+      val file1 = manager.createClipOutputFile("PERIMETER", "REAR", com.example.model.ClipNamingPattern.STANDARD, ts)
+      file1.writeBytes(ByteArray(2048) { 1 })
+
+      // Creating another clip at the exact same timestamp should deduplicate with _01
+      val file2 = manager.createClipOutputFile("PERIMETER", "REAR", com.example.model.ClipNamingPattern.STANDARD, ts)
+      file2.writeBytes(ByteArray(4096) { 2 })
+
+      assertFalse(file1.name == file2.name)
+      assertTrue(file2.name.endsWith("_01.mp4"))
+
+      val clips = manager.listSavedClips()
+      assertEquals(2, clips.size)
+      assertEquals(6144L, manager.getTotalStorageBytes())
+
+      assertTrue(manager.deleteClip(file1.absolutePath))
+      assertEquals(1, manager.listSavedClips().size)
+
+      assertEquals(1, manager.clearAllClips())
+      assertTrue(manager.listSavedClips().isEmpty())
+    } finally {
+      tempDir.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `viewModel tracks video recording lifecycle and logs saved clip event`() {
+    val viewModel = CyberGuardViewModel()
+    viewModel.setClipNamingPrefix("LOBBY")
+    viewModel.setClipNamingPattern(com.example.model.ClipNamingPattern.INCIDENT_LOG)
+    assertEquals("LOBBY", viewModel.uiState.value.clipNamingPrefix)
+    assertEquals(com.example.model.ClipNamingPattern.INCIDENT_LOG, viewModel.uiState.value.clipNamingPattern)
+
+    viewModel.startVideoRecording("/data/user/0/com.example/files/cctv_clips/INC_LOBBY_REAR_20261120_013000.mp4")
+    assertTrue(viewModel.uiState.value.isRecordingVideo)
+    assertTrue(viewModel.uiState.value.isDeviceCameraActive)
+
+    viewModel.updateRecordingProgress(5200L)
+    assertEquals(5200L, viewModel.uiState.value.recordingDurationMs)
+
+    val savedClip = com.example.model.SavedVideoClip(
+      id = "INC_LOBBY_REAR_20261120_013000.mp4",
+      fileName = "INC_LOBBY_REAR_20261120_013000.mp4",
+      filePath = "/data/user/0/com.example/files/cctv_clips/INC_LOBBY_REAR_20261120_013000.mp4",
+      sizeBytes = 102400L,
+      durationMs = 5200L,
+      createdAtMillis = 1763631045000L,
+      sourceLabel = "Device Cam (Rear)"
+    )
+    viewModel.onVideoRecordingSaved(savedClip.fileName, 5200L, listOf(savedClip), 102400L)
+
+    assertFalse(viewModel.uiState.value.isRecordingVideo)
+    assertEquals(1, viewModel.uiState.value.savedVideoClips.size)
+    assertEquals(102400L, viewModel.uiState.value.totalClipsStorageBytes)
+    assertEquals("CLIP_SAVED_200", viewModel.uiState.value.events.first().errorCode)
+  }
 }
